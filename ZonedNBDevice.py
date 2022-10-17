@@ -12,6 +12,7 @@ __author__ = "Srikanth Mantravadi"
 __email__ = "sxm6373@psu.edu"
 
 from sortedcontainers import SortedDict
+from LinkedList import LinkedList
 import logging as lg
 
 lg.basicConfig(level=lg.DEBUG)
@@ -27,18 +28,33 @@ PAGE_SIZE = 4 * KB
 class NullBlkPage:
     size = PAGE_SIZE
     pagedata = None
-    rockmap = None
+    rocklist = None
     pageid: int
     staddr: int
     endaddr: int
+    allocated: bool
 
     def __init__(self, st, end):
         self.pagedata = bytearray(self.size)
-        self.rockmap = dict()
+        self.rocklist = LinkedList()
         self.staddr = st
         self.pageid = int(st/(4*KB))
         self.endaddr = end
+        # finally mark allocated
+        self.mark_alloc()
 
+    def mark_alloc(self):
+        self.allocated = True
+    def mark_dealloc(self):
+        self.allocated = False
+
+    def is_allocated(self):
+        return self.allocated
+
+    def clear_rocklist(self):
+        if self.is_allocated():
+            raise Exception("Cannot clear page, deallocate first")
+        self.rocklist.clear()
 
 class Zone:
     st_addr: int
@@ -58,7 +74,11 @@ class Zone:
 
     def reset(self):
         self.wptr = self.st_addr
-        self.open = True
+        # for each page in zone, set pages to deallocated and clear its rocklist
+        for k in self.data.keys():
+            cpage = self.data.get(k)
+            cpage.mark_dealloc()
+            cpage.clear_rocklist()
 
 
 class ZonedNBDevice:
@@ -89,6 +109,10 @@ class ZonedNBDevice:
             curr_zone = self.zones[j]
             lg.debug("Zone#: %d, start addr: %s", curr_zone.id, hex(curr_zone.st_addr))
 
+    def get_zone(self, addr):
+        zoneid = int(addr / self.zonesize)
+        return self.zones[zoneid]
+
     def lookup_page(self, addr, allocate=True):
         """
         Lookup the null blk page AND/OR allocate and return if none present
@@ -100,35 +124,46 @@ class ZonedNBDevice:
         pageid = int(addr / PAGE_SIZE)
 
         zonedata = self.zones[zoneid].data
-        pagedata = zonedata.get(pageid, None)
+        pagedata: NullBlkPage = zonedata.get(pageid, None)
+
+        is_page_dealloc = False
+        if pagedata and not pagedata.is_allocated():
+            is_page_dealloc = True
+            pagedata = None
 
         if not allocate:
             return pagedata
 
         if not pagedata:
-            # allocate the device mem page now
             # each page is a 4KB mutable array of bytes
+            # allocate the mem for page now or if already present change status to alloc
+
+            if is_page_dealloc:
+                pagedata: NullBlkPage = zonedata.get(pageid)
+                pagedata.mark_alloc()
+                return pagedata
+
             zonedata.setdefault(pageid, NullBlkPage(pageid * 4 * KB, pageid * 4 * KB + PAGE_SIZE - 1))
             pagedata = zonedata.get(pageid)
 
         return pagedata
 
-    def zwrite(self, addr, nbytes, src) -> int:
+    def _zwrite(self, addr, nbytes, src) -> int:
         bytes_written = 0
         caddr = addr
 
         zoneid = int(caddr / self.zonesize)
         czone = self.zones[zoneid]
 
-        # abandon if not enough space in curr zone
-        if czone.end_addr - czone.wptr + 1 < nbytes:
-            lg.error("Not enough space in zone with id: %d", zoneid)
-            raise Exception("Not enough space in zone")
-
         # abandon if addr does not match write ptr
         if self.zones[zoneid].wptr != caddr:
             lg.error("Write address provided is not at write ptr")
             raise Exception("Address does not match write ptr")
+
+        # abandon if not enough space in curr zone
+        if czone.end_addr - czone.wptr + 1 < nbytes:
+            lg.error("Not enough space in zone with id: %d", zoneid)
+            raise Exception("Not enough space in zone")
 
         # allocate if needed and write data to required num of device pages
         src_idx = 0
@@ -155,7 +190,7 @@ class ZonedNBDevice:
         self.zones[zoneid].wptr = new_wptr
         return new_wptr
 
-    def zread(self, addr, nbytes, dest):
+    def _zread(self, addr, nbytes, dest):
         bytes_read = 0
         caddr = addr
 
@@ -190,6 +225,21 @@ class ZonedNBDevice:
                 destp += 1
                 caddr += 1
 
+    def reset_zone(self, staddr=-1, zoneid=-1):
+        zone = None
+        if staddr > -1:
+            zone = self.get_zone(staddr)
+
+        if zoneid > -1:
+            zone = self.zones[zoneid]
+
+        if zone:
+            lg.debug("Resetting zone with id: %d", zone.id)
+            zone.reset()
+            return
+
+        raise Exception("Atleast one of staddr or zoneid is needed")
+
     def write_rock(self, saddr: int, nbytes: int, src: bytearray) -> int:
         """
         Write a rock from given start address using data in source buffer
@@ -201,13 +251,9 @@ class ZonedNBDevice:
         """
         stpage: NullBlkPage = self.lookup_page(saddr)
 
-        if stpage.rockmap.get(saddr, None):
-            lg.error("Data already exists at given start addr !")
-            return -1
-
-        new_wptr = self.zwrite(saddr, nbytes, src)
+        new_wptr = self._zwrite(saddr, nbytes, src)
         # if write is successful, make an entry of rock
-        stpage.rockmap.setdefault(saddr, nbytes)
+        stpage.rocklist.add({"key": saddr, "size": nbytes})
 
         return new_wptr
 
@@ -224,14 +270,15 @@ class ZonedNBDevice:
         if not stpage:
             raise Exception("No rock exists at given address !")
 
-        rock_size = stpage.rockmap.get(saddr, None)
-        if not rock_size:
+        rock_data = stpage.rocklist.find(saddr)
+        if not rock_data:
             raise Exception("No rock exists at given address !")
 
+        rock_size = rock_data.data.get('size')
         if rock_size != nbytes:
             raise Exception("Rock size incorrect, unable to read arbitrary bytes in rock")
 
-        self.zread(saddr, rock_size, dest)
+        self._zread(saddr, rock_size, dest)
 
 
 """
@@ -250,3 +297,13 @@ if __name__ == "__main__":
     data = bytearray(1024)
     zbd.read_rock(0, 1024, data)
     lg.debug(str(data))
+
+    # uncomment to reset zone and try the same write again
+    # zbd.reset_zone(-1, 0)
+
+    # write same data again, fails if zone is not reset
+    # lg.debug("Write ptr at %d", zbd.write_rock(0, 1024, bytearray(1024)))
+    # lg.debug("Write ptr at %d", zbd.write_rock(1024, 6, bytearray(b"ABCDEF")))
+    # lg.debug("Write ptr at %d", zbd.write_rock(1030, 6, bytearray(b"123456")))
+    # wb = 9 * KB
+    # lg.debug("Write ptr at %d", zbd.write_rock(1036, wb, bytearray(wb)))
