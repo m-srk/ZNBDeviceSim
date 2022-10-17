@@ -113,40 +113,6 @@ class ZonedNBDevice:
 
         return pagedata
 
-    def zread(self, addr, nbytes) -> bytearray:
-        bytes_read = 0
-        caddr = addr
-
-        zoneid = int(caddr/self.zonesize)
-        czone = self.zones[zoneid]
-
-        # abandon if entire payload not in one zone
-        if czone.end_addr - caddr + 1 < nbytes:
-            lg.error("Data to be read must be part of one zone!")
-            raise Exception("Data requested spans multiple zones")
-
-        readout = bytearray(nbytes)
-        destp = 0
-        while bytes_read != nbytes:
-            bytes_left = nbytes - bytes_read
-            lg.debug("Read: %d, left %d", bytes_read, bytes_left)
-            page: NullBlkPage = self.lookup_page(caddr)
-
-            n = page.endaddr - caddr + 1
-            n = n if n < bytes_left else bytes_left
-            byteaddr = caddr % PAGE_SIZE
-
-            lg.debug("Reading %d bytes from %d to %d in zone %d. pageid: %d",
-                     n, byteaddr, (byteaddr+n-1), zoneid, page.pageid)
-
-            for i in range(byteaddr, byteaddr+n):
-                readout[destp] = page.pagedata[i]
-                bytes_read += 1
-                destp += 1
-                caddr += 1
-
-        return readout
-
     def zwrite(self, addr, nbytes, src) -> int:
         bytes_written = 0
         caddr = addr
@@ -187,13 +153,49 @@ class ZonedNBDevice:
         # update and return wptr
         new_wptr = addr + nbytes
         self.zones[zoneid].wptr = new_wptr
-        return (new_wptr)
+        return new_wptr
 
-    def write_rock(self, saddr, src: bytearray) -> int:
+    def zread(self, addr, nbytes, dest):
+        bytes_read = 0
+        caddr = addr
+
+        zoneid = int(caddr/self.zonesize)
+        czone = self.zones[zoneid]
+
+        # abandon if entire payload not in one zone
+        if czone.end_addr - caddr + 1 < nbytes:
+            lg.error("Data to be read must be part of one zone!")
+            raise Exception("Data requested spans multiple zones")
+
+        # abandon if dest buffer size not same as nbytes
+        if len(dest) != nbytes:
+            raise Exception("dest buffer size not same as payload size")
+
+        destp = 0
+        while bytes_read != nbytes:
+            bytes_left = nbytes - bytes_read
+            lg.debug("Read: %d, left %d", bytes_read, bytes_left)
+            page: NullBlkPage = self.lookup_page(caddr)
+
+            n = page.endaddr - caddr + 1
+            n = n if n < bytes_left else bytes_left
+            byteaddr = caddr % PAGE_SIZE
+
+            lg.debug("Reading %d bytes from %d to %d in zone %d. pageid: %d",
+                     n, byteaddr, (byteaddr+n-1), zoneid, page.pageid)
+
+            for i in range(byteaddr, byteaddr+n):
+                dest[destp] = page.pagedata[i]
+                bytes_read += 1
+                destp += 1
+                caddr += 1
+
+    def write_rock(self, saddr: int, nbytes: int, src: bytearray) -> int:
         """
         Write a rock from given start address using data in source buffer
         Note: This method can raise exceptions
         :param saddr: start address of rock
+        :param nbytes: num of bytes to write
         :param src: source data buffer to write from
         :return: updated write ptr
         """
@@ -203,18 +205,19 @@ class ZonedNBDevice:
             lg.error("Data already exists at given start addr !")
             return -1
 
-        new_wptr = self.zwrite(saddr, len(src), src)
+        new_wptr = self.zwrite(saddr, nbytes, src)
         # if write is successful, make an entry of rock
-        stpage.rockmap.setdefault(saddr, len(src))
+        stpage.rockmap.setdefault(saddr, nbytes)
 
         return new_wptr
 
-    def read_rock(self, saddr) -> bytearray:
+    def read_rock(self, saddr: int, nbytes: int, dest: bytearray):
         """
         Read a rock from the given starting address
         Note: This method can raise exceptions
         :param saddr: rock start address
-        :return: bytearray with read payload
+        :param nbytes: num of bytes to read
+        :param dest: destination buffer to copy rock data into
         """
         stpage: NullBlkPage = self.lookup_page(saddr, allocate=False)
 
@@ -225,7 +228,10 @@ class ZonedNBDevice:
         if not rock_size:
             raise Exception("No rock exists at given address !")
 
-        return self.zread(saddr, rock_size)
+        if rock_size != nbytes:
+            raise Exception("Rock size incorrect, unable to read arbitrary bytes in rock")
+
+        self.zread(saddr, rock_size, dest)
 
 
 """
@@ -234,11 +240,13 @@ Driver logic:
 if __name__ == "__main__":
     zbd = ZonedNBDevice(5, 64)
     # write testing
-    lg.debug("Write ptr at %d", zbd.write_rock(0, bytearray(1024)))
-    lg.debug("Write ptr at %d", zbd.write_rock(1024, bytearray(b"ABCDEF")))
-    lg.debug("Write ptr at %d", zbd.write_rock(1030, bytearray(b"123456")))
+    lg.debug("Write ptr at %d", zbd.write_rock(0, 1024, bytearray(1024)))
+    lg.debug("Write ptr at %d", zbd.write_rock(1024, 6, bytearray(b"ABCDEF")))
+    lg.debug("Write ptr at %d", zbd.write_rock(1030, 6, bytearray(b"123456")))
     wb = 9*KB
-    zbd.write_rock(1036, bytearray(wb))
+    lg.debug("Write ptr at %d", zbd.write_rock(1036, wb, bytearray(wb)))
 
     # read testing
-    lg.debug(str(zbd.read_rock(1024)))
+    data = bytearray(1024)
+    zbd.read_rock(0, 1024, data)
+    lg.debug(str(data))
