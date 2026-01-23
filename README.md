@@ -21,13 +21,6 @@ ZNBDeviceSim provides a software implementation of a Zoned Null Block device, wh
 
 ## Architecture
 
-### Core Components
-
-- **ZonedNBDevice**: Main device simulator managing multiple zones
-- **Zone**: Represents a storage zone with sequential write pointer
-- **NullBlkPage**: 4KB page structure with data storage and rock tracking
-- **LinkedList**: Custom linked list for tracking rocks within pages
-
 ### Key Concepts
 
 - **Zone**: A contiguous region of storage with a write pointer that advances sequentially
@@ -43,14 +36,6 @@ ZNBDeviceSim provides a software implementation of a Zoned Null Block device, wh
 git clone https://github.com/m-srk/ZNBDeviceSim.git
 cd ZNBDeviceSim
 pip install -r requirements.txt
-```
-
-### Using pip (Development Install)
-
-```bash
-git clone https://github.com/m-srk/ZNBDeviceSim.git
-cd ZNBDeviceSim
-pip install -e .
 ```
 
 ### Prerequisites
@@ -126,11 +111,6 @@ Resets a zone, moving write pointer back to start and deallocating pages.
 get_zone(addr: int) -> Zone
 ```
 Returns the zone object containing the given address.
-
-```python
-lookup_page(addr: int, allocate: bool = True) -> NullBlkPage
-```
-Looks up or allocates a page for the given address.
 
 ## Constraints and Behavior
 
@@ -211,15 +191,6 @@ Run examples:
 ```bash
 PYTHONPATH=. python examples/basic_usage.py
 PYTHONPATH=. python examples/error_handling.py
-```
-
-## Logging
-
-The simulator uses Python's logging module with DEBUG level by default. To adjust logging:
-
-```python
-import logging
-logging.basicConfig(level=logging.INFO)  # Change to INFO, WARNING, or ERROR
 ```
 
 ## Testing
